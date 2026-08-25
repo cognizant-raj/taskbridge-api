@@ -1,0 +1,91 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id            String    @id @default(cuid())
+  name          String    @db.VarChar(255)
+  slug          String    @unique @db.VarChar(100)
+  createdAt     DateTime  @default(now()) @db.Timestamp
+  updatedAt     DateTime  @updatedAt @db.Timestamp
+
+  projects      Project[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+
+  @@map("organizations")
+}
+
+model Project {
+  id            String    @id @default(cuid())
+  orgId         String
+  name          String    @db.VarChar(255)
+  description   String?   @db.VarChar(2000)
+  status        String    @default("active") // active, archived, deleted
+  createdAt     DateTime  @default(now()) @db.Timestamp
+  updatedAt     DateTime  @updatedAt @db.Timestamp
+  createdBy     String    // User ID
+
+  organization  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  auditLogs     AuditLog[]
+  notifications Notification[]
+
+  @@index([orgId])
+  @@unique([id, orgId])
+  @@map("projects")
+}
+
+model AuditLog {
+  id              String    @id @default(cuid())
+  orgId           String
+  eventType       String    // PROJECT_CREATED, PROJECT_UPDATED, PROJECT_DELETED, PROJECT_STATUS_CHANGED, MILESTONE_REOPENED
+  entityType      String    // Project, Milestone, etc.
+  entityId        String
+  actorUserId     String
+  actorOrgId      String
+  actorEmail      String?
+  actorIpAddress  String?   // Optional, added in scope change
+  beforeState     Json?
+  afterState      Json
+  changeDescription String?
+  createdAt       DateTime  @default(now()) @db.Timestamp
+
+  organization    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project         Project?   @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, entityId])
+  @@index([orgId, createdAt])
+  @@index([orgId, eventType])
+  @@unique([id, orgId])
+  @@map("audit_logs")
+}
+
+model Notification {
+  id              String    @id @default(cuid())
+  recipientUserId String
+  orgId           String
+  eventType       String
+  projectId       String
+  message         String    @db.VarChar(500)
+  actionUrl       String?
+  isRead          Boolean   @default(false)
+  readAt          DateTime?
+  createdAt       DateTime  @default(now()) @db.Timestamp
+
+  organization    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project         Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, recipientUserId, isRead])
+  @@index([orgId, projectId])
+  @@index([createdAt])
+  @@unique([id, orgId])
+  @@map("notifications")
+}
