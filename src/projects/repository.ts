@@ -16,6 +16,7 @@ export class ProjectRepository {
     orgId: string;
     name: string;
     description?: string;
+    teamId?: string;
     status?: string;
     createdBy: string;
   }): Promise<Project> {
@@ -24,6 +25,7 @@ export class ProjectRepository {
         orgId: data.orgId,
         name: data.name,
         description: data.description,
+        teamId: data.teamId,
         status: data.status || 'active',
         createdBy: data.createdBy,
       },
@@ -61,6 +63,28 @@ export class ProjectRepository {
       where: {
         orgId, // CRITICAL: Always include org filter
       },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      skip: offset,
+    });
+  }
+
+  /**
+   * Get projects belonging to a team within an organization.
+   * @param teamId - Team identifier
+   * @param orgId - Organization identifier
+   * @param limit - Maximum number of projects
+   * @param offset - Number of projects to skip
+   * @returns Tenant-scoped projects
+   */
+  async findByTeam(
+    teamId: string,
+    orgId: string,
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<Project[]> {
+    return prisma.project.findMany({
+      where: { teamId, orgId },
       orderBy: { createdAt: 'desc' },
       take: limit,
       skip: offset,

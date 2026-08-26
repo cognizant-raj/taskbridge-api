@@ -1,8 +1,8 @@
 import { ProjectRepository } from './repository';
 import { AuditService } from '../audit/service';
 import { AuditRepository } from '../audit/repository';
-import { NotificationService } from '../notification/service';
-import { NotificationRepository } from '../notification/repository';
+import { NotificationService } from '../notifications/service';
+import { NotificationRepository } from '../notifications/repository';
 import { ValidationError, NotFoundError, InternalServerError } from '../shared/errors';
 import { logInfo, logError } from '../shared/logger';
 
@@ -34,8 +34,10 @@ export class ProjectService {
       orgId: string;
       name: string;
       description?: string;
+      teamId: string;
     },
-    actorUserId: string
+    actorUserId: string,
+    actorIpAddress?: string
   ): Promise<{
     id: string;
     name: string;
@@ -58,6 +60,7 @@ export class ProjectService {
         orgId: data.orgId,
         name: data.name,
         description: data.description,
+        teamId: data.teamId,
         createdBy: actorUserId,
       });
 
@@ -69,6 +72,7 @@ export class ProjectService {
         entityId: project.id,
         actorUserId,
         actorOrgId: data.orgId,
+        actorIpAddress,
         afterState: {
           id: project.id,
           name: project.name,
@@ -134,7 +138,8 @@ export class ProjectService {
       description: string;
       status: string;
     }>,
-    actorUserId: string
+    actorUserId: string,
+    actorIpAddress?: string
   ): Promise<{
     id: string;
     name: string;
@@ -158,13 +163,19 @@ export class ProjectService {
       const updated = await this.repository.update(projectId, orgId, updates);
 
       // Record audit entry
+      const eventType = project.status === 'archived' && updates.status === 'active'
+        ? 'MILESTONE_REOPENED'
+        : updates.status !== undefined
+          ? 'PROJECT_STATUS_CHANGED'
+          : 'PROJECT_UPDATED';
       await this.auditService.recordAudit({
         orgId,
-        eventType: 'PROJECT_UPDATED',
+        eventType,
         entityType: 'Project',
         entityId: projectId,
         actorUserId,
         actorOrgId: orgId,
+        actorIpAddress,
         beforeState: {
           name: project.name,
           description: project.description,
@@ -182,7 +193,7 @@ export class ProjectService {
       await this.notificationService.notifyTeamOnProjectChange({
         projectId,
         orgId,
-        eventType: 'PROJECT_UPDATED',
+        eventType,
         message: `Project "${updated.name}" has been updated`,
         actorUserId,
         actionUrl: `/projects/${projectId}`,
@@ -264,6 +275,31 @@ export class ProjectService {
   }
 
   /**
+   * List projects for a tenant-scoped team.
+   * @param teamId - Team identifier
+   * @param orgId - Organization identifier
+   * @returns Projects assigned to the team
+   */
+  async getProjectsByTeam(teamId: string, orgId: string): Promise<Array<{
+    id: string;
+    name: string;
+    teamId?: string | null;
+    status: string;
+    createdAt: Date;
+    updatedAt: Date;
+  }>> {
+    const projects = await this.repository.findByTeam(teamId, orgId);
+    return projects.map((project) => ({
+      id: project.id,
+      name: project.name,
+      teamId: project.teamId,
+      status: project.status,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    }));
+  }
+
+  /**
    * Delete a project (soft delete)
    * @param projectId - Project ID
    * @param orgId - Organization ID
@@ -273,7 +309,8 @@ export class ProjectService {
   async deleteProject(
     projectId: string,
     orgId: string,
-    actorUserId: string
+    actorUserId: string,
+    actorIpAddress?: string
   ): Promise<{
     id: string;
     status: string;
@@ -295,6 +332,7 @@ export class ProjectService {
         entityId: projectId,
         actorUserId,
         actorOrgId: orgId,
+        actorIpAddress,
         beforeState: {
           id: project.id,
           name: project.name,
@@ -306,6 +344,15 @@ export class ProjectService {
           status: deleted.status,
         },
         changeDescription: `Project "${project.name}" deleted`,
+      });
+
+      await this.notificationService.notifyTeamOnProjectChange({
+        projectId,
+        orgId,
+        eventType: 'PROJECT_DELETED',
+        message: `Project "${project.name}" has been deleted`,
+        actorUserId,
+        actionUrl: `/projects/${projectId}`,
       });
 
       logInfo(

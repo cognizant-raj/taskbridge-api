@@ -20,6 +20,7 @@ model Organization {
   projects      Project[]
   auditLogs     AuditLog[]
   notifications Notification[]
+  projectMembers ProjectMember[]
 
   @@map("organizations")
 }
@@ -33,14 +34,31 @@ model Project {
   createdAt     DateTime  @default(now()) @db.Timestamp
   updatedAt     DateTime  @updatedAt @db.Timestamp
   createdBy     String    // User ID
+  teamId        String?
 
   organization  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
   auditLogs     AuditLog[]
   notifications Notification[]
+  members       ProjectMember[]
 
   @@index([orgId])
   @@unique([id, orgId])
   @@map("projects")
+}
+
+model ProjectMember {
+  id        String   @id @default(cuid())
+  orgId     String
+  projectId String
+  userId    String
+  createdAt DateTime @default(now()) @db.Timestamp
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, projectId, userId])
+  @@index([orgId, projectId])
+  @@map("project_members")
 }
 
 model AuditLog {

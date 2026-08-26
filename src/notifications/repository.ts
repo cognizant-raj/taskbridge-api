@@ -8,6 +8,19 @@ const prisma = new PrismaClient();
  */
 export class NotificationRepository {
   /**
+   * Find all project members in the same tenant for notification dispatch.
+   * @param projectId - Project identifier
+   * @param orgId - Organization identifier
+   * @returns User identifiers for the project team
+   */
+  async findProjectTeamMemberIds(projectId: string, orgId: string): Promise<string[]> {
+    const members = await prisma.projectMember.findMany({
+      where: { projectId, orgId },
+      select: { userId: true },
+    });
+    return members.map((member) => member.userId);
+  }
+  /**
    * Create a new notification
    * @param data - Notification data
    * @returns Created notification

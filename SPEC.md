@@ -1,746 +1,88 @@
-# SPEC.md - TaskBridge Notification & Audit Service
+# TaskBridge Notification & Audit Service Specification
 
-## Executive Summary
+## 1. Purpose and Scope
 
-This specification defines the Notification & Audit Service for TaskBridge, a B2B SaaS project collaboration platform. The service provides:
+TaskBridge is a multi-tenant B2B collaboration platform. The remediated Project Service in `src/projects/` owns project lifecycle changes. The Notification & Audit Service in `src/notifications/` records compliance history and creates notifications for project members. Every request and persistence operation carries organization context; a user must never read or mutate another organization's data.
 
-1. **Immutable Audit Logging** — Compliance-grade event tracking with before/after state snapshots
-2. **Real-time Notifications** — Event-driven notification dispatch to team members
-3. **Multi-tenant Data Isolation** — Strict org-level access control
-4. **Queryable Audit History** — Time-range and event-type filtered retrieval
+Technology: TypeScript/Node.js 18+, Express, Prisma, PostgreSQL, Joi, Pino, and Jest.
 
-**Scope:** Notification & Audit Service, integrated with existing Project Service
-**Technology Stack:** TypeScript/Node.js, Express.js, Prisma ORM, PostgreSQL
-**Timeline:** 120-minute implementation with full test coverage
+## 2. Data Models
 
----
+### Project
 
-## 1. Audit Log Model
+| Field | Type | Rules |
+|---|---|---|
+| `id` | `string` | CUID primary key |
+| `orgId` | `string` | Required tenant key; indexed |
+| `teamId` | `string?` | Team assignment |
+| `name` | `string` | Required, 1-255 characters |
+| `description` | `string?` | Maximum 2,000 characters |
+| `status` | `string` | `active`, `archived`, or `deleted` |
+| `createdBy` | `string` | Authenticated actor |
+| `createdAt`, `updatedAt` | `DateTime` | Database-managed timestamps |
 
-### Schema
-```prisma
-model AuditLog {
-  // Primary Key
-  id              String    @id @default(cuid())
-  
-  // Tenant Isolation
-  orgId           String    // Organization (required for data isolation)
-  
-  // Event Details
-  eventType       String    // Enum: PROJECT_CREATED, PROJECT_UPDATED, PROJECT_DELETED, PROJECT_STATUS_CHANGED, MILESTONE_REOPENED
-  entityType      String    // 'Project', 'Milestone', 'Task', etc.
-  entityId        String    // ID of the changed entity
-  
-  // Actor Information
-  actorUserId     String    // Who made the change
-  actorOrgId      String    // Actor's organization (must equal orgId for integrity)
-  actorEmail      String?   // Actor email for readability
-  actorIpAddress  String?   // IP address (nullable, added in scope change)
-  
-  // State Snapshots
-  beforeState     Json      // Complete previous state (null on CREATE)
-  afterState      Json      // Complete new state (required)
-  changeDescription String?  // Human-readable summary
-  
-  // Immutability & Audit Trail
-  createdAt       DateTime  @default(now()) @db.Timestamp
-  
-  // Relations
-  organization    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  
-  // Indexes for query performance
-  @@index([orgId, entityId])        // Find all changes to an entity
-  @@index([orgId, createdAt])       // Time-range queries
-  @@index([orgId, eventType])       // Event type filtering
-  @@unique([id, orgId])             // Enforce org isolation
-  
-  // Security: Audit table is append-only in application layer
-  @@map("audit_logs")
-}
-```
+`ProjectMember` stores `(orgId, projectId, userId)` with a uniqueness constraint. Notification fan-out reads members using both `projectId` and `orgId`.
 
-### Data Integrity Rules
-1. **Immutability:** No UPDATE or DELETE operations on audit entries after creation
-2. **Org Isolation:** Every query includes `WHERE orgId = ?`
-3. **Complete State Snapshots:** `beforeState` and `afterState` must contain full entity representation
-4. **Actor Verification:** `actorOrgId` must equal `orgId` (prevent cross-org impersonation)
-5. **Timestamp Precision:** `createdAt` captured at UTC
-6. **IP Address:** Optional, captured for compliance (see IMPACT_ANALYSIS.md for GDPR considerations)
+### AuditLog
 
----
+| Field | Type | Rules |
+|---|---|---|
+| `id` | `string` | CUID primary key |
+| `orgId` | `string` | Required tenant key |
+| `eventType` | `AuditEventType` | `PROJECT_CREATED`, `PROJECT_UPDATED`, `PROJECT_STATUS_CHANGED`, `PROJECT_DELETED`, or `MILESTONE_REOPENED` |
+| `entityType`, `entityId` | `string` | Changed resource identity |
+| `actorUserId`, `actorOrgId` | `string` | Actor and asserted tenant; values must match |
+| `actorEmail` | `string?` | Optional display value |
+| `actorIpAddress` | `string?` | Nullable scope-change field; never logged |
+| `beforeState` | `Json?` | Complete prior snapshot; absent on create |
+| `afterState` | `Json` | Complete new snapshot |
+| `createdAt` | `DateTime` | Database UTC timestamp |
 
-## 2. Notification Model
+Audit persistence is append-only: the repository exposes `create`, `find`, and `count` only. No update or delete API exists. Tenant/date/event indexes support required queries.
 
-### Schema
-```prisma
-model Notification {
-  // Primary Key
-  id              String    @id @default(cuid())
-  
-  // Recipient & Tenant
-  recipientUserId String    // Who receives this notification
-  orgId           String    // Organization (tenant isolation)
-  
-  // Content
-  eventType       String    // PROJECT_CREATED, PROJECT_STATUS_CHANGED, etc.
-  projectId       String    // Related project
-  message         String    @db.VarChar(500) // Notification body
-  
-  // Metadata
-  actionUrl       String?   // Deep link to related resource
-  
-  // Read Status
-  isRead          Boolean   @default(false)
-  readAt          DateTime? // When marked as read
-  
-  // Timestamp
-  createdAt       DateTime  @default(now()) @db.Timestamp
-  
-  // Relations
-  organization    Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  project         Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  
-  // Indexes
-  @@index([orgId, recipientUserId, isRead]) // Query unread notifications efficiently
-  @@index([orgId, projectId])               // Find notifications for a project
-  @@index([createdAt])                      // Recent notifications
-  @@unique([id, orgId])                     // Enforce org isolation
-  
-  @@map("notifications")
-}
-```
+### Notification
 
-### Rules
-1. **Multi-tenant Isolation:** All queries include `orgId` filter
-2. **Read Status Tracking:** Timestamps capture when notification was marked read
-3. **Soft Expiry:** Notifications never deleted; querying filters by date/read status
-4. **Action URLs:** Enable deep linking to relevant resources (project dashboards)
+`Notification` contains `id: string`, `recipientUserId: string`, `orgId: string`, `eventType: AuditEventType`, `projectId: string`, `message: string` (maximum 500), `actionUrl: string?`, `isRead: boolean` (default false), `readAt: DateTime?`, and `createdAt: DateTime`. Queries always filter by recipient and organization.
 
----
+## 3. API Contracts
 
-## 3. Core Service Logic
+All client endpoints require a verified JWT with `sub` and `orgId` claims. The internal audit endpoint requires the `x-internal-service-token` header matching `INTERNAL_SERVICE_TOKEN`; it is not available to ordinary user requests.
 
-### 3.1 Audit Recording
+### `POST /api/audit`
 
-#### AuditService.recordAudit()
-```typescript
-interface AuditEntry {
-  orgId: string;
-  eventType: string;
-  entityType: string;
-  entityId: string;
-  actorUserId: string;
-  actorOrgId: string;
-  actorEmail?: string;
-  actorIpAddress?: string;
-  beforeState?: Record<string, unknown>;
-  afterState: Record<string, unknown>;
-  changeDescription?: string;
-}
+Request: `{ orgId, eventType, entityType, entityId, actorUserId, actorOrgId, actorEmail?, actorIpAddress?, beforeState?, afterState, changeDescription? }`.
 
-async recordAudit(entry: AuditEntry): Promise<AuditLog>
-```
+Response `201`: `{ id, orgId, eventType, entityId, actorUserId, createdAt }`. Invalid fields or `actorOrgId !== orgId` return `400`; persistence failures return `500`.
 
-**Responsibilities:**
-- Validate org isolation (actorOrgId === orgId)
-- Create immutable audit log entry
-- Never update or delete existing entries
-- Capture complete state snapshots
-- Return created audit entry
+### `GET /api/audit/:projectId`
 
-**Error Handling:**
-- `ValidationError` if `beforeState` === `afterState` (no change)
-- `ValidationError` if `actorOrgId` !== `orgId` (org mismatch)
-- `ValidationError` if `eventType` invalid
-- `InternalServerError` if database write fails
+Query: `from?: ISO-8601`, `to?: ISO-8601`, `eventType?: AuditEventType`, `limit` default 50/max 200, `offset` default 0. Response: `{ data: AuditLogSummary[], pagination: { total, limit, offset, hasMore } }`. The organization is taken from JWT context, never from the URL.
 
-**Example:**
-```typescript
-await auditService.recordAudit({
-  orgId: 'org-123',
-  eventType: 'PROJECT_STATUS_CHANGED',
-  entityType: 'Project',
-  entityId: 'proj-456',
-  actorUserId: 'user-789',
-  actorOrgId: 'org-123',
-  actorEmail: 'alice@company.com',
-  actorIpAddress: '192.168.1.1',
-  beforeState: { status: 'active', name: 'Q4 Planning' },
-  afterState: { status: 'archived', name: 'Q4 Planning' },
-  changeDescription: 'Project archived by Alice'
-});
-```
+### `GET /api/notifications/:userId`
 
-### 3.2 Notification Dispatch
+The authenticated user may access only their own notifications unless an explicit administrative permission exists. Query supports `isRead`, `limit` default 20/max 100, and `offset`. Response includes notification data and pagination/unread count.
 
-#### NotificationService.notifyTeamOnProjectChange()
-```typescript
-interface ProjectChangeEvent {
-  projectId: string;
-  orgId: string;
-  eventType: string;
-  message: string;
-  actorUserId: string; // Exclude from notifications
-  actionUrl?: string;
-}
+### `PATCH /api/notifications/:id/read`
 
-async notifyTeamOnProjectChange(event: ProjectChangeEvent): Promise<Notification[]>
-```
+The authenticated user may mark only their own tenant-scoped notification as read. Response includes `id`, `recipientUserId`, `isRead`, and `readAt`; missing or unauthorized records return `404` or `403`.
 
-**Responsibilities:**
-- Query all team members assigned to the project
-- Exclude the actor (person who made the change)
-- Create notification record for each team member
-- Ensure all records include `orgId` for isolation
-- Return array of created notifications
+## 4. Integration and State Flow
 
-**Error Handling:**
-- `NotFoundError` if project doesn't exist
-- `ValidationError` if required fields missing
-- `InternalServerError` if batch insert fails
+1. An authenticated Project Service request is validated and authorized against `orgId`.
+2. The service loads the current project, stores the complete `beforeState`, and performs a tenant-scoped Prisma update or soft delete.
+3. It calls `AuditService.recordAudit` with the event, actor, tenant, trusted request IP when available, and complete `afterState`.
+4. It calls `NotificationService.notifyTeamOnProjectChange`, which loads project members by both project and organization and creates one notification for each non-actor member.
+5. A future production hardening step is a transactional outbox or shared transaction so a project mutation, audit record, and notification batch cannot diverge.
 
-**Example:**
-```typescript
-const notifications = await notificationService.notifyTeamOnProjectChange({
-  projectId: 'proj-456',
-  orgId: 'org-123',
-  eventType: 'PROJECT_STATUS_CHANGED',
-  message: 'Project "Q4 Planning" status changed to archived',
-  actorUserId: 'user-789', // Alice is excluded
-  actionUrl: '/projects/proj-456'
-});
-// Returns notifications sent to all other team members
-```
+## 5. Constraints and Validation
 
-### 3.3 Service Integration: Project Service → Audit & Notification
+- No raw SQL or direct Prisma access in controllers/services; repositories own data access.
+- All route payloads are validated with Joi; status and event values are allow-listed.
+- Tenant identity comes from verified authentication context and is never trusted from arbitrary request body values.
+- Audit snapshots are write-once and must show a real state change except where a create event has no prior state.
+- IP capture is optional and subject to retention, access-control, privacy, and redaction policy; it must not be written to logs. An archived-to-active transition emits `MILESTONE_REOPENED`.
+- Database migrations are additive and existing audit rows remain readable.
 
-#### ProjectService.updateProjectStatus()
-When a project's milestone status changes:
+## 6. Copilot Assistance and Human Judgment
 
-```typescript
-async updateProjectStatus(
-  projectId: string,
-  newStatus: string,
-  userId: string,
-  orgId: string
-): Promise<Project> {
-  // 1. Fetch current project
-  const project = await projectRepository.findByIdAndOrg(projectId, orgId);
-  if (!project) throw new NotFoundError(`Project ${projectId} not found`);
-  
-  // 2. Authorize user
-  if (!await projectService.userHasAccess(userId, projectId, orgId)) {
-    throw new AuthorizationError(`User ${userId} cannot modify project`);
-  }
-  
-  // 3. Store before state
-  const beforeState = { ...project };
-  
-  // 4. Update project
-  const updatedProject = await projectRepository.update(projectId, { status: newStatus });
-  
-  // 5. Record audit entry
-  await auditService.recordAudit({
-    orgId,
-    eventType: 'PROJECT_STATUS_CHANGED',
-    entityType: 'Project',
-    entityId: projectId,
-    actorUserId: userId,
-    actorOrgId: orgId,
-    beforeState,
-    afterState: updatedProject
-  });
-  
-  // 6. Notify team members
-  await notificationService.notifyTeamOnProjectChange({
-    projectId,
-    orgId,
-    eventType: 'PROJECT_STATUS_CHANGED',
-    message: `Project status changed from ${beforeState.status} to ${newStatus}`,
-    actorUserId: userId,
-    actionUrl: `/projects/${projectId}`
-  });
-  
-  return updatedProject;
-}
-```
-
----
-
-## 4. API Endpoints
-
-### 4.1 Audit Endpoints
-
-#### POST /audit
-**Internal endpoint** — Called by Project Service to record audit events
-
-**Authentication:** Service-to-service (internal API key or shared secret)
-
-**Request Body:**
-```json
-{
-  "orgId": "org-123",
-  "eventType": "PROJECT_STATUS_CHANGED",
-  "entityType": "Project",
-  "entityId": "proj-456",
-  "actorUserId": "user-789",
-  "actorOrgId": "org-123",
-  "actorEmail": "alice@company.com",
-  "actorIpAddress": "192.168.1.1",
-  "beforeState": {
-    "id": "proj-456",
-    "status": "active",
-    "name": "Q4 Planning"
-  },
-  "afterState": {
-    "id": "proj-456",
-    "status": "archived",
-    "name": "Q4 Planning"
-  }
-}
-```
-
-**Response (201):**
-```json
-{
-  "id": "audit-001",
-  "orgId": "org-123",
-  "eventType": "PROJECT_STATUS_CHANGED",
-  "entityId": "proj-456",
-  "actorUserId": "user-789",
-  "createdAt": "2024-01-15T10:30:00Z"
-}
-```
-
-**Response (400):**
-```json
-{
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "actorOrgId must equal orgId"
-  }
-}
-```
-
----
-
-#### GET /audit/:projectId
-**Query audit history for a project** — User must belong to the project's organization
-
-**Authentication:** JWT token with org context
-
-**Query Parameters:**
-- `from` (optional): ISO-8601 start date (e.g., `2024-01-01T00:00:00Z`)
-- `to` (optional): ISO-8601 end date (e.g., `2024-01-31T23:59:59Z`)
-- `eventType` (optional): Filter by event type (e.g., `PROJECT_STATUS_CHANGED`)
-- `limit` (optional): Max results (default 50, max 200)
-- `offset` (optional): Pagination offset (default 0)
-
-**Example Request:**
-```
-GET /audit/proj-456?from=2024-01-01T00:00:00Z&to=2024-01-31T23:59:59Z&eventType=PROJECT_STATUS_CHANGED&limit=20
-```
-
-**Response (200):**
-```json
-{
-  "data": [
-    {
-      "id": "audit-001",
-      "orgId": "org-123",
-      "eventType": "PROJECT_STATUS_CHANGED",
-      "entityType": "Project",
-      "entityId": "proj-456",
-      "actorUserId": "user-789",
-      "actorEmail": "alice@company.com",
-      "beforeState": { "status": "active" },
-      "afterState": { "status": "archived" },
-      "createdAt": "2024-01-15T10:30:00Z"
-    }
-  ],
-  "pagination": {
-    "total": 25,
-    "limit": 20,
-    "offset": 0,
-    "hasMore": true
-  }
-}
-```
-
-**Response (403):**
-```json
-{
-  "error": {
-    "code": "UNAUTHORIZED",
-    "message": "You do not have access to this project's audit log"
-  }
-}
-```
-
----
-
-### 4.2 Notification Endpoints
-
-#### GET /notifications/:userId
-**Get all unread notifications for a user**
-
-**Authentication:** JWT token (can only access own notifications or admin)
-
-**Query Parameters:**
-- `isRead` (optional): Filter by read status (`true`, `false`, or omit for all)
-- `limit` (optional): Max results (default 20, max 100)
-- `offset` (optional): Pagination offset
-
-**Example Request:**
-```
-GET /notifications/user-789?isRead=false&limit=20
-```
-
-**Response (200):**
-```json
-{
-  "data": [
-    {
-      "id": "notif-001",
-      "recipientUserId": "user-789",
-      "eventType": "PROJECT_STATUS_CHANGED",
-      "projectId": "proj-456",
-      "message": "Project 'Q4 Planning' status changed to archived",
-      "isRead": false,
-      "actionUrl": "/projects/proj-456",
-      "createdAt": "2024-01-15T10:30:00Z",
-      "readAt": null
-    },
-    {
-      "id": "notif-002",
-      "recipientUserId": "user-789",
-      "eventType": "PROJECT_CREATED",
-      "projectId": "proj-789",
-      "message": "New project 'Q1 Planning' created",
-      "isRead": true,
-      "actionUrl": "/projects/proj-789",
-      "createdAt": "2024-01-14T15:22:00Z",
-      "readAt": "2024-01-14T15:23:00Z"
-    }
-  ],
-  "pagination": {
-    "total": 12,
-    "unreadCount": 5,
-    "limit": 20,
-    "offset": 0
-  }
-}
-```
-
-**Response (401):**
-```json
-{
-  "error": {
-    "code": "UNAUTHORIZED",
-    "message": "Invalid or expired JWT token"
-  }
-}
-```
-
----
-
-#### PATCH /notifications/:id/read
-**Mark a notification as read**
-
-**Authentication:** JWT token (can only mark own notifications as read)
-
-**Request Body:**
-```json
-{
-  "isRead": true
-}
-```
-
-**Response (200):**
-```json
-{
-  "id": "notif-001",
-  "recipientUserId": "user-789",
-  "eventType": "PROJECT_STATUS_CHANGED",
-  "projectId": "proj-456",
-  "message": "Project 'Q4 Planning' status changed to archived",
-  "isRead": true,
-  "readAt": "2024-01-15T10:35:00Z"
-}
-```
-
-**Response (404):**
-```json
-{
-  "error": {
-    "code": "NOT_FOUND",
-    "message": "Notification not found"
-  }
-}
-```
-
----
-
-## 5. Multi-Tenant Data Isolation
-
-### Isolation Strategy
-
-**Every query must include the `orgId` filter to prevent cross-org data leakage.**
-
-```typescript
-// ✅ CORRECT: Org isolation enforced
-async getAuditHistory(projectId: string, orgId: string): Promise<AuditLog[]> {
-  return await prisma.auditLog.findMany({
-    where: {
-      entityId: projectId,
-      orgId: orgId // REQUIRED
-    }
-  });
-}
-
-// ❌ WRONG: Missing org filter = data leak
-async getAuditHistory(projectId: string): Promise<AuditLog[]> {
-  return await prisma.auditLog.findMany({
-    where: {
-      entityId: projectId
-      // orgId missing!
-    }
-  });
-}
-```
-
-### Enforcement Points
-
-1. **Repository Layer:** All queries parameterized with `orgId`
-2. **Service Layer:** Accept `orgId` from authenticated user context
-3. **Controller Layer:** Extract `orgId` from JWT token; validate user belongs to org
-4. **Database:** Indexes on `(orgId, entityId)` for query efficiency
-5. **Tests:** Every test verifies org isolation (attempt cross-org access must fail)
-
----
-
-## 6. Immutability Enforcement
-
-### Audit Entry Immutability
-
-**Audit entries are append-only. No UPDATE or DELETE operations permitted.**
-
-#### Application Layer Enforcement
-```typescript
-// ✅ AuditService has NO update() or delete() methods
-class AuditService {
-  async recordAudit(entry: AuditEntry): Promise<AuditLog> {
-    return await auditRepository.create(entry);
-  }
-  
-  async queryHistory(projectId: string, orgId: string, filters: Filters): Promise<AuditLog[]> {
-    return await auditRepository.find(projectId, orgId, filters);
-  }
-  
-  // ❌ These methods MUST NOT exist:
-  // async updateAuditEntry() {}
-  // async deleteAuditEntry() {}
-}
-```
-
-#### Repository Layer Enforcement
-```typescript
-// ✅ AuditRepository: CREATE and READ only
-class AuditRepository {
-  async create(entry: AuditEntry): Promise<AuditLog> {
-    return await prisma.auditLog.create({ data: entry });
-  }
-  
-  async find(projectId: string, orgId: string, filters: Filters): Promise<AuditLog[]> {
-    return await prisma.auditLog.findMany({
-      where: {
-        entityId: projectId,
-        orgId,
-        ...filters
-      }
-    });
-  }
-  
-  // ❌ No update() or delete() methods
-}
-```
-
-#### Database Layer Enforcement (PostgreSQL)
-```sql
--- Audit table: append-only constraint
--- No UPDATE or DELETE triggers allowed
-CREATE TABLE audit_logs (
-  id CUID PRIMARY KEY,
-  org_id UUID NOT NULL,
-  event_type VARCHAR(100) NOT NULL,
-  entity_id CUID NOT NULL,
-  actor_user_id CUID NOT NULL,
-  before_state JSONB,
-  after_state JSONB NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  UNIQUE(id, org_id),
-  FOREIGN KEY(org_id) REFERENCES organizations(id) ON DELETE CASCADE
-);
-
--- Prevent any modification of audit log
-CREATE RULE prevent_audit_update AS ON UPDATE TO audit_logs
-  DO INSTEAD NOTHING;
-
-CREATE RULE prevent_audit_delete AS ON DELETE TO audit_logs
-  DO INSTEAD NOTHING;
-
--- Index for performance
-CREATE INDEX idx_audit_org_entity ON audit_logs(org_id, entity_id);
-CREATE INDEX idx_audit_org_date ON audit_logs(org_id, created_at);
-CREATE INDEX idx_audit_org_type ON audit_logs(org_id, event_type);
-```
-
----
-
-## 7. Event Types
-
-### Defined Event Types
-```typescript
-enum AuditEventType {
-  PROJECT_CREATED = 'PROJECT_CREATED',
-  PROJECT_UPDATED = 'PROJECT_UPDATED',
-  PROJECT_STATUS_CHANGED = 'PROJECT_STATUS_CHANGED',
-  PROJECT_DELETED = 'PROJECT_DELETED',
-  MILESTONE_REOPENED = 'MILESTONE_REOPENED' // Added in scope change
-}
-```
-
-### Scope Change: MILESTONE_REOPENED
-- **Trigger:** When a project milestone transitions from 'archived' to 'active'
-- **Audit Entry:** Captured with full before/after state
-- **Notification:** Dispatched to all team members
-- **Impact Analysis:** See IMPACT_ANALYSIS.md for implementation sequencing
-
----
-
-## 8. Error Handling
-
-### Error Codes and HTTP Status
-
-| Error Code | HTTP Status | Scenario |
-|-----------|------------|----------|
-| VALIDATION_ERROR | 400 | Invalid input (missing field, wrong type, org mismatch) |
-| UNAUTHORIZED | 401 | Invalid/expired JWT or missing auth header |
-| FORBIDDEN | 403 | User not in org or lacks project access |
-| NOT_FOUND | 404 | Audit entry, notification, or project not found |
-| CONFLICT | 409 | Duplicate notification or audit entry |
-| INTERNAL_ERROR | 500 | Database error, service failure |
-
-### Error Response Format
-```json
-{
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "User-facing error message",
-    "details": {
-      "field": "orgId",
-      "reason": "must equal actorOrgId"
-    }
-  },
-  "requestId": "req-abc-123",
-  "timestamp": "2024-01-15T10:30:00Z"
-}
-```
-
----
-
-## 9. Testing Requirements
-
-### Minimum Test Coverage
-
-#### 1. Audit Service Tests
-- ✅ Audit entry created correctly with before/after state
-- ✅ Audit entry CANNOT be updated or deleted (immutability)
-- ✅ Org isolation enforced (actorOrgId must equal orgId)
-- ✅ Invalid eventType rejected
-
-#### 2. Notification Service Tests
-- ✅ Notifications dispatched to all team members on project change
-- ✅ Actor (person making change) excluded from notifications
-- ✅ Org isolation enforced on queries
-- ✅ Unread notifications filtered correctly
-
-#### 3. Audit Query Tests
-- ✅ Audit history query returns correct results for date range
-- ✅ Audit history query filtered by eventType returns only matching entries
-- ✅ Audit history respects org isolation (unauthorized user cannot access)
-- ✅ Pagination works correctly (limit, offset)
-
-#### 4. Integration Tests
-- ✅ Project status change triggers audit entry AND notifications
-- ✅ Audit entry and notifications created atomically (both or neither)
-- ✅ Multi-tenant isolation on integrated flow
-
----
-
-## 10. Performance Considerations
-
-### Database Indexes
-```prisma
-// Audit queries by date range
-@@index([orgId, createdAt])
-
-// Audit queries by event type
-@@index([orgId, eventType])
-
-// Audit queries by entity
-@@index([orgId, entityId])
-
-// Notification queries by user
-@@index([orgId, recipientUserId, isRead])
-```
-
-### Query Optimization
-- Use index on `(orgId, createdAt)` for time-range queries
-- Use index on `(orgId, eventType)` for event-type filtering
-- Paginate large result sets (limit 200 max)
-- Lazy-load relationships (don't fetch organization data unless requested)
-
----
-
-## 11. Scope Change: MILESTONE_REOPENED
-
-### What's Changing
-1. **New Event Type:** `MILESTONE_REOPENED` added to AuditEventType enum
-2. **New Field:** `actorIpAddress` added to AuditLog model (optional, nullable)
-3. **Migration Required:** Database schema update + backfill (no-op)
-
-### Impact Analysis
-See **IMPACT_ANALYSIS.md** for:
-- Detailed ripple effects across all files
-- Security & GDPR implications of IP address capture
-- Recommended implementation sequencing
-- Backward compatibility verification
-
----
-
-## 12. Implementation Checklist
-
-- [ ] AuditLog Prisma model created with immutability constraints
-- [ ] Notification Prisma model created with org isolation
-- [ ] AuditService with recordAudit() and query methods (NO update/delete)
-- [ ] NotificationService with notifyTeamOnProjectChange()
-- [ ] ProjectService integration: updateProjectStatus() calls Audit + Notification
-- [ ] POST /audit endpoint (internal, service-to-service)
-- [ ] GET /audit/:projectId endpoint (with date range + eventType filters)
-- [ ] GET /notifications/:userId endpoint (with pagination)
-- [ ] PATCH /notifications/:id/read endpoint
-- [ ] Input validation on all endpoints (Joi)
-- [ ] Error handling with specific exception types
-- [ ] Multi-tenant isolation verified on all queries
-- [ ] Audit immutability enforced (tests confirm no update/delete possible)
-- [ ] Tests: ≥6 test cases covering scenarios in Section 9
-- [ ] Structured logging (Pino) on all operations
-- [ ] Database indexes created for performance
-- [ ] API documentation (this SPEC.md)
-
----
-
-**Version:** 1.0
-**Last Updated:** 2024-08-25
-**Status:** Ready for Implementation
+Copilot helped draft the initial model and API outline, suggest layered TypeScript structure, and refine validation/test prompts. Human review corrected the generated in-memory project store, missing tenant predicates, hard-delete behavior, hard-coded notification recipients, mock authentication, and the privacy implications of IP capture. The exact baseline prompt and subsequent prompts are recorded in `PROMPTS.md`; the implementation was accepted only after manual review and tests were designed around the stated business invariants.

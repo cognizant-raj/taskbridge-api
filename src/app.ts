@@ -2,8 +2,8 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import { requestIdMiddleware, errorHandler, authenticateJWT } from './shared/middleware';
 import { logInfo, logError } from './shared/logger';
 import auditRouter from './audit/controller';
-import notificationRouter from './notification/controller';
-import projectRouter from './project/controller';
+import notificationRouter from './notifications/controller';
+import projectRouter from './projects/controller';
 
 /**
  * Initialize Express application with middleware and routes

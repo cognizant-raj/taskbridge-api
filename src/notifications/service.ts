@@ -8,7 +8,12 @@ import { ProjectChangeEvent } from '../types';
  * Dispatches notifications to team members on project changes
  */
 export class NotificationService {
-  constructor(private repository: NotificationRepository) {}
+  constructor(
+    private repository: NotificationRepository,
+    private readonly teamMemberProvider: (projectId: string, orgId: string) => Promise<string[]> =
+      (projectId: string, orgId: string): Promise<string[]> =>
+        repository.findProjectTeamMemberIds(projectId, orgId)
+  ) {}
 
   /**
    * Notify team members about a project change
@@ -27,9 +32,7 @@ export class NotificationService {
     createdAt: Date;
   }>> {
     try {
-      // Mock: In production, fetch team members from database
-      // For this implementation, simulate fetching team members
-      const teamMembers = await this.getProjectTeamMembers(event.projectId, event.orgId);
+      const teamMembers = await this.teamMemberProvider(event.projectId, event.orgId);
 
       // Filter out the actor (person who made the change)
       const recipientIds = teamMembers
@@ -223,17 +226,4 @@ export class NotificationService {
     }
   }
 
-  /**
-   * Mock implementation: Get project team members
-   * In production, this would query the database for team membership
-   */
-  private async getProjectTeamMembers(projectId: string, orgId: string): Promise<string[]> {
-    // Mock: Return sample team members
-    // In production, fetch from team_members table filtered by projectId and orgId
-    return [
-      'user-001',
-      'user-002',
-      'user-003',
-    ];
-  }
 }

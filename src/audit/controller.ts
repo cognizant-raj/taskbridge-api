@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { AuditService } from './service';
 import { AuditRepository } from './repository';
-import { AuthenticatedRequest, authenticateJWT } from '../shared/middleware';
+import { AuthenticatedRequest, authenticateInternalService, authenticateJWT } from '../shared/middleware';
 import { createAuditSchema, auditQuerySchema } from '../shared/validation';
 import { ValidationError, NotFoundError } from '../shared/errors';
 import { logInfo } from '../shared/logger';
@@ -15,7 +15,7 @@ const auditService = new AuditService(auditRepository);
  * Internal endpoint to record an audit entry
  * Authentication: Service-to-service (internal)
  */
-router.post('/audit', async (req, res, next) => {
+router.post('/audit', authenticateInternalService, async (req, res, next) => {
   try {
     const { error, value } = createAuditSchema.validate(req.body);
     if (error) {

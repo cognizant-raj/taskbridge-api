@@ -17,7 +17,7 @@ export const createAuditSchema = Joi.object({
   actorUserId: Joi.string().required(),
   actorOrgId: Joi.string().required(),
   actorEmail: Joi.string().email().optional(),
-  actorIpAddress: Joi.string().optional(),
+  actorIpAddress: Joi.string().ip({ version: ['ipv4', 'ipv6'] }).optional(),
   beforeState: Joi.object().optional(),
   afterState: Joi.object().required(),
   changeDescription: Joi.string().optional(),
@@ -54,3 +54,15 @@ export const notificationQuerySchema = Joi.object({
   limit: Joi.number().min(1).max(100).default(20),
   offset: Joi.number().min(0).default(0),
 });
+
+export const createProjectSchema = Joi.object({
+  name: Joi.string().trim().max(255).required(),
+  description: Joi.string().trim().max(2000).allow('').optional(),
+  teamId: Joi.string().trim().max(100).required(),
+});
+
+export const updateProjectSchema = Joi.object({
+  name: Joi.string().trim().max(255).optional(),
+  description: Joi.string().trim().max(2000).allow('').optional(),
+  status: Joi.string().valid('active', 'archived').optional(),
+}).min(1);

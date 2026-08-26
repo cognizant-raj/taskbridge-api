@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthenticationError, AuthorizationError } from './errors';
-import { logWarn } from './logger';
+import jwt, { JwtPayload } from 'jsonwebtoken';
 
 /**
  * Extract org ID from request context
@@ -11,6 +11,12 @@ export interface AuthenticatedRequest extends Request {
   orgId?: string;
   userEmail?: string;
   userIpAddress?: string;
+}
+
+interface TaskBridgeJwtPayload extends JwtPayload {
+  sub: string;
+  orgId: string;
+  email?: string;
 }
 
 /**
@@ -25,16 +31,19 @@ export function authenticateJWT(req: AuthenticatedRequest, res: Response, next: 
       throw new AuthenticationError('Missing or invalid authorization header');
     }
 
-    // Mock token parsing - in production, use jsonwebtoken
     const token = authHeader.substring(7);
-    if (token === 'invalid') {
-      throw new AuthenticationError('Invalid token');
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new AuthenticationError('Authentication is not configured');
+    let payload: TaskBridgeJwtPayload;
+    try {
+      payload = jwt.verify(token, jwtSecret) as TaskBridgeJwtPayload;
+    } catch {
+      throw new AuthenticationError('Invalid or expired token');
     }
-
-    // Mock user context - in production, extract from decoded JWT
-    req.userId = 'user-' + token.substring(0, 8);
-    req.orgId = 'org-' + token.substring(8, 16);
-    req.userEmail = 'user@example.com';
+    if (!payload.sub || !payload.orgId) throw new AuthenticationError('Token is missing identity claims');
+    req.userId = payload.sub;
+    req.orgId = payload.orgId;
+    req.userEmail = payload.email;
     req.userIpAddress = req.ip || '127.0.0.1';
 
     next();
@@ -57,6 +66,30 @@ export function authenticateJWT(req: AuthenticatedRequest, res: Response, next: 
       });
     }
   }
+}
+
+/**
+ * Authenticate service-to-service requests using a dedicated shared token.
+ * @param req - Incoming request
+ * @param res - HTTP response
+ * @param next - Express continuation
+ */
+export function authenticateInternalService(req: Request, res: Response, next: NextFunction): void {
+  const expectedToken = process.env.INTERNAL_SERVICE_TOKEN;
+  const suppliedToken = req.headers['x-internal-service-token'];
+
+  if (!expectedToken || suppliedToken !== expectedToken) {
+    res.status(401).json({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Valid internal service credentials are required',
+      },
+      requestId: req.id,
+    });
+    return;
+  }
+
+  next();
 }
 
 /**

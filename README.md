@@ -20,17 +20,22 @@ taskbridge-api/
 ├── .github/
 │   └── copilot-instructions.md
 ├── src/
-│   ├── projects/
+│   ├── projects/                 # Remediated Project Service
+│   │   ├── model.ts
+│   │   ├── repository.ts
+│   │   ├── service.ts
+│   │   ├── controller.ts
+│   │   └── unreviewed/           # Preserved contractor baseline
+│   │       ├── model.ts
+│   │       └── service.ts
+│   ├── notifications/
 │   │   ├── model.ts
 │   │   ├── repository.ts
 │   │   ├── service.ts
 │   │   └── controller.ts
-│   ├── notifications/
+│   ├── audit/                    # Audit model/repository/service/controller
 │   │   ├── model.ts
-│   │   ├── service.ts
-│   │   └── controller.ts
-│   ├── audit/
-│   │   ├── model.ts
+│   │   ├── repository.ts
 │   │   ├── service.ts
 │   │   └── controller.ts
 │   ├── shared/
@@ -42,10 +47,12 @@ taskbridge-api/
 │   │   └── index.ts
 │   └── app.ts
 ├── tests/
-│   ├── projects.test.ts
-│   ├── notifications.test.ts
-│   ├── audit.test.ts
-│   └── integration.test.ts
+│   ├── setup.ts
+│   └── unit/
+│       ├── projects.service.test.ts
+│       ├── notifications.service.test.ts
+│       ├── audit.service.test.ts
+│       └── TEST_DOCUMENTATION.md
 ├── .env.example
 ├── .gitignore
 ├── package.json
@@ -54,7 +61,11 @@ taskbridge-api/
 ├── SPEC.md
 ├── REVIEW.md
 ├── ARCHITECTURE.md
-└── IMPACT_ANALYSIS.md
+├── IMPACT_ANALYSIS.md
+├── PROMPTS.md
+├── PR_DESCRIPTION.md
+├── TOOL_STRATEGY.md
+└── ARCHITECTURE_DIAGRAM.md
 ```
 
 ## Features
@@ -66,7 +77,7 @@ taskbridge-api/
 - Get projects by team/organization
 
 ### Notification & Audit Service
-- Real-time notifications on project milestone changes
+- Persisted notification records on project milestone changes
 - Immutable audit log for compliance
 - Audit history queryable by date range and event type
 - Track who changed what and when
@@ -118,7 +129,7 @@ npm run test:coverage
 ### Projects
 - `POST /projects` - Create a new project
 - `GET /projects/:id` - Get project details
-- `PUT /projects/:id` - Update project
+- `PATCH /projects/:id` - Update project
 - `DELETE /projects/:id` - Delete project
 - `GET /projects/team/:teamId` - Get projects by team
 
@@ -130,12 +141,21 @@ npm run test:coverage
 - `GET /notifications/:userId` - Get user notifications
 - `PATCH /notifications/:id/read` - Mark notification as read
 
+Authentication uses a JWT containing `sub` and `orgId` claims. Set `JWT_SECRET` before
+starting the application; the service rejects missing, invalid, and expired tokens.
+
+The current implementation persists notification records; delivery to WebSocket, email,
+or another external real-time transport is intentionally outside this sprint's boundary.
+
 ## Documentation
 
 - `SPEC.md` - Technical specification
 - `REVIEW.md` - Code review findings
 - `ARCHITECTURE.md` - Architecture documentation
 - `IMPACT_ANALYSIS.md` - Scope change impact analysis
+- `PROMPTS.md` - Copilot prompt chain and corrections
+- `TOOL_STRATEGY.md` - Feature usage, scenarios, and limitations
+- `PR_DESCRIPTION.md` - Review-ready pull request description
 
 ## Security & Compliance
 
